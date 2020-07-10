@@ -1,3 +1,9 @@
 *.csv
+!x_train.csv
+!y_train.csv
+!x_val.csv
+!y_val.csv
+!x_test.csv
+!y_test.csv
 *.sqlite
 .ipynb_checkpoints
