@@ -1,0 +1,21 @@
+Ideas
+
+Time frame: limit to clean data for now
+
+Features
+1 row per match
+home team, away team
+result: (1,-1,0)
+home goals
+away goals
+22 players * player attributes (time specific)
+Team Form: Previous matches, exponentially weighted?
+Team form specific to the match
+
+Attacking Form: Previous matches, exponentially weighted?
+Defensive Form: Previous matches, exponentially weighted?
+
+Player form?
+Formation?
+
+
