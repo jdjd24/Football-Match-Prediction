@@ -1,6 +1,7 @@
 Ideas
 
-Time frame: limit to clean data for now
+Time frame: limit to clean data for now. 
+use recent data for test as this is closest to what we want to predict 
 
 Features
 1 row per match
@@ -15,7 +16,17 @@ Team form specific to the match
 Attacking Form: Previous matches, exponentially weighted?
 Defensive Form: Previous matches, exponentially weighted?
 
+Betting Odds
+Take log loss as baseline
+
 Player form?
 Formation?
+
+
+Limit attributes to overall ratings
+
+switch to cross entropy loss for probability.
+
+win/not win - make easy to switch between
 
 
