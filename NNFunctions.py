@@ -18,6 +18,7 @@ from sklearn.metrics import log_loss
 from sklearn.model_selection import KFold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
+from sklearn.metrics import accuracy_score
 cross = nn.CrossEntropyLoss()
 
 def get_ens_df(x, scaler, model_dict): ##Gets the predictions of all the different models, given a scaler, and the explanatory variables
@@ -30,7 +31,7 @@ def get_ens_df(x, scaler, model_dict): ##Gets the predictions of all the differe
         with torch.no_grad():
             pred = model(Tensor(X.values))
             
-        x_train_ens = pd.DataFrame(data =  np.array(pred), index = x.index, columns = ['{}_0'.format(model_name), '{}_1'.format(model_name), '{}_2'.format(model_name)])
+        x_train_ens = pd.DataFrame(data =  np.array(pred), index = x.index, columns = ['{}_0'.format(model_name), '{}_1'.format(model_name)])
         x_ens = pd.concat([x_ens, x_train_ens], axis = 1)
     return x_ens
 
@@ -60,13 +61,14 @@ def ensemble_predict_simple(models, x, y, scaler):
             pred_ensemble += pred
     
     y_ens = pd.Series(pred_ensemble.max(1).indices)
-    print('Ensemble accuracy: {}'.format(accuracy_score(y_ens, y['target'])))
+    print('Ensemble accuracy: {}'.format(accuracy_score(y_ens, y['target_binary'])))
+    #print('Ensemble log loss: {}'.format(log_loss(y['target'], y_ens)))
     
 def train_many(model_dict, x_train, y_train, batch_size, splits = 1, epochs = 5, learning_rate = 0.01):
     if splits == 1:
         _, __, ___, ____ = train_test_split(x_train, y_train, test_size = 0.15, random_state = 1)
-        training_indices = [(_.index, ___.index)]
-        _, __, ___, ____ = 0
+        training_indices = [(_.index, ____.index)]
+        _, __, ___, ____ = 0, 0, 0, 0
     
     results = pd.DataFrame(data = 0, index = model_dict.keys(), columns = ['t_acc', 't_loss', 'v_acc', 'v_loss'])
     big_losses_list = [] ##for plotting losses
@@ -89,7 +91,7 @@ def train_many(model_dict, x_train, y_train, batch_size, splits = 1, epochs = 5,
             results.loc[model_name, :] = results.loc[model_name, :].add(results_list)
             big_losses_list.append(losses)
             print('. ', end=' ')
-
+            
 
     results /= splits
     return results, big_losses_list
@@ -105,9 +107,9 @@ def train(model, X_train, Y_train, X_val, Y_val, epochs, batch_size, learning_ra
     loss, counter = 0, 0
     losses_train, losses_val = [], []
 
-    dataset = TensorDataset(Tensor(X_train.values), torch.Tensor(Y_train['target'].values))
+    dataset = TensorDataset(Tensor(X_train.values), torch.Tensor(Y_train['target_binary'].values))
     train_loader = DataLoader(dataset, batch_size = batch_size, shuffle=False)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=(0.9,0.999), weight_decay=0.1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=(0.9,0.999), weight_decay=0.2)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size= 25 , gamma = 0.1)
     
     #Train Model
@@ -127,15 +129,15 @@ def train(model, X_train, Y_train, X_val, Y_val, epochs, batch_size, learning_ra
             
             #store errors
             with torch.no_grad():
+                model.eval()
                 y_train_pred = model(Tensor(X_train.values))
                 y_val_pred = model(Tensor(X_val.values))
                 
-                loss_train = cross(y_train_pred, Tensor(Y_train['target'].values).long())
-                loss_val = cross(y_val_pred, Tensor(Y_val['target'].values).long())
+                loss_train = cross(y_train_pred, Tensor(Y_train['target_binary'].values).long())
+                loss_val = cross(y_val_pred, Tensor(Y_val['target_binary'].values).long())
                 
                 losses_train.append(loss_train.item())
-                losses_val.append(loss_val.item())
-                
+                losses_val.append(loss_val.item()) 
                 
             #if counter % 100 ==0:
                 #print('Loss after iteration {}: {}'.format(counter, loss_train.item()))
@@ -154,7 +156,7 @@ def evaluate(model, x, y):
     global pred_results 
     pred_results = pd.Series(pred.max(1).indices)
 
-    return sklearn.metrics.accuracy_score(pred_results, y['target']), log_loss(y['target'], pred) 
+    return sklearn.metrics.accuracy_score(pred_results, y['target_binary']), log_loss(y['target_binary'], pred) 
 
 
 
@@ -241,4 +243,5 @@ def get_score(model, x, y, scaler):
     global pred_results 
     pred_results = pd.Series(pred.max(1).indices)
 
-    return sklearn.metrics.accuracy_score(pred_results, y['target']), log_loss(y['target'], pred) 
+    print(sklearn.metrics.accuracy_score(pred_results, y['target_binary']), log_loss(y['target_binary'], pred) )
+    return pred_results
