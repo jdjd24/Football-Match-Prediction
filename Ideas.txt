@@ -30,3 +30,19 @@ switch to cross entropy loss for probability.
 win/not win - make easy to switch between
 
 
+
+
+Neural Nets
+Initialization - Xavier?
+No. layers/Neurons - how to estimate?
+Good learning rate?
+Adam beta - how to tune?
+Batch size?
+Drop out / weight decay?
+Ensemble method?
+Data - remove some features? How to determine most useful features?
+
+
+
+
+

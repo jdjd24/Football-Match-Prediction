@@ -19,6 +19,7 @@ from sklearn.model_selection import KFold
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import accuracy_score
+from pathlib import Path
 cross = nn.CrossEntropyLoss()
 
 def get_ens_df(x, scaler, model_dict): ##Gets the predictions of all the different models, given a scaler, and the explanatory variables
@@ -40,6 +41,7 @@ def plot_losses(big_losses_list, model_dict, splits): ##input is a list of tuple
     fig, axes = plt.subplots(nrows = len(model_dict), ncols=splits, figsize = (splits*4, len(model_dict)*2))
     for i, ax in enumerate(axes.flatten()):
         if i < len(big_losses_list):
+            
             ax.plot(big_losses_list[i][0])
             ax.plot(big_losses_list[i][1])
             ax.set_title(list(model_dict.keys())[math.floor(i/splits)])
@@ -64,9 +66,9 @@ def ensemble_predict_simple(models, x, y, scaler):
     print('Ensemble accuracy: {}'.format(accuracy_score(y_ens, y['target_binary'])))
     #print('Ensemble log loss: {}'.format(log_loss(y['target'], y_ens)))
     
-def train_many(model_dict, x_train, y_train, batch_size, splits = 1, epochs = 5, learning_rate = 0.01):
+def train_many(model_dict, x_train, y_train, batch_size, splits = 1, epochs = 5, learning_rate = 0.01, use_scheduler = False, scheduler_step_size = 50):
     if splits == 1:
-        _, __, ___, ____ = train_test_split(x_train, y_train, test_size = 0.15, random_state = 1)
+        _, __, ___, ____ = train_test_split(x_train, y_train, test_size = 0.1, random_state = 1)
         training_indices = [(_.index, ____.index)]
         _, __, ___, ____ = 0, 0, 0, 0
     
@@ -75,7 +77,7 @@ def train_many(model_dict, x_train, y_train, batch_size, splits = 1, epochs = 5,
 
 
     for model_name in model_dict:
-        model = model_dict[model_name].model
+        model = model_dict[model_name]
         print('\n' + model_name)
         
         if splits > 1:
@@ -86,88 +88,144 @@ def train_many(model_dict, x_train, y_train, batch_size, splits = 1, epochs = 5,
             
             X_train, X_val = x_train[x_train.index.isin(train_index)], x_train[x_train.index.isin(val_index)]
             Y_train, Y_val = y_train[y_train.index.isin(train_index)], y_train[y_train.index.isin(val_index)]
+  
             
-            results_list, losses, all_pred = train(model, X_train, Y_train, X_val, Y_val, epochs, len(X_train), learning_rate)
+            results_list, losses = model.train(X_train, Y_train, X_val, Y_val, epochs, get_batch_size(X_train, batch_size), learning_rate, use_scheduler,  scheduler_step_size)
             results.loc[model_name, :] = results.loc[model_name, :].add(results_list)
             big_losses_list.append(losses)
             print('. ', end=' ')
-            
+    
 
     results /= splits
     return results, big_losses_list
 
-
-
-
-def train(model, X_train, Y_train, X_val, Y_val, epochs, batch_size, learning_rate):
-    StandardScaler = preprocessing.StandardScaler().fit(X_train.iloc[:,1:])
-    X_train = pd.DataFrame(StandardScaler.transform(X_train.iloc[:,1:]), index = X_train['match_api_id'], columns = X_train.iloc[:,1:].columns)
-    X_val = pd.DataFrame(StandardScaler.transform(X_val.iloc[:,1:]), index = X_val['match_api_id'], columns = X_val.iloc[:,1:].columns)
-    
-    loss, counter = 0, 0
-    losses_train, losses_val = [], []
-
-    dataset = TensorDataset(Tensor(X_train.values), torch.Tensor(Y_train['target_binary'].values))
-    train_loader = DataLoader(dataset, batch_size = batch_size, shuffle=False)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=(0.9,0.999), weight_decay=0.2)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size= 25 , gamma = 0.1)
-    
-    #Train Model
-    t = time.time()
-    for epoch in range(epochs):
-        for x, y in iter(train_loader):
-            model.train()
-            model.zero_grad()
-            
-            #forward
-            y_pred = model(x)
-            loss = cross(y_pred, y.long())
- 
-            #backward + update
-            loss.backward()
-            optimizer.step()
-            
-            #store errors
-            with torch.no_grad():
-                model.eval()
-                y_train_pred = model(Tensor(X_train.values))
-                y_val_pred = model(Tensor(X_val.values))
-                
-                loss_train = cross(y_train_pred, Tensor(Y_train['target_binary'].values).long())
-                loss_val = cross(y_val_pred, Tensor(Y_val['target_binary'].values).long())
-                
-                losses_train.append(loss_train.item())
-                losses_val.append(loss_val.item()) 
-                
-            #if counter % 100 ==0:
-                #print('Loss after iteration {}: {}'.format(counter, loss_train.item()))
-                
-            counter+=1 
-        scheduler.step()
-    time.time()-t        
-    
-    ##Returns train/val accuracy/losses, the losses during the training for plotting, the prediction probabilities to be used for ensemble stuff
-    return list(evaluate(model, X_train, Y_train)) + list(evaluate(model, X_val, Y_val)), (losses_train, losses_val), (y_train_pred,y_val_pred) 
-
-def evaluate(model, x, y):
-    model.eval()
-    with torch.no_grad():
-        pred = model(Tensor(x.values))
-    global pred_results 
-    pred_results = pd.Series(pred.max(1).indices)
-
-    return sklearn.metrics.accuracy_score(pred_results, y['target_binary']), log_loss(y['target_binary'], pred) 
-
-
+def get_batch_size(x, size):
+    if type(size) != int :
+        size = len(x)
+    return size 
+        
+def init_weights(m):
+    if type(m) == nn.Linear:
+        torch.nn.init.xavier_uniform_(m.weight)
 
 class LinearNN():
-    def __init__(self, num_layers, in_out, sizes, activation_type, drop_out):
+    def __init__(self, model_name, num_layers, in_out, sizes, activation_type, drop_out):
         self.model = self.n_layer_net(num_layers, in_out, sizes, activation_type, drop_out)
         self.activation_type = activation_type
         self.drop_out_p = drop_out
         self.num_layers = num_layers
         self.activation_type = activation_type
+        self.name = model_name
+    
+       
+    
+    def get_score(self, x, y, scaler):
+        x = pd.DataFrame(scaler.transform(x.iloc[:,1:]), index = x['match_api_id'], columns = x.iloc[:,1:].columns)
+        model = self.model
+        model.eval()
+        with torch.no_grad():
+            pred = model(Tensor(x.values))
+        pred_results = pd.Series(pred.max(1).indices)
+
+        print(sklearn.metrics.accuracy_score(pred_results, y['target_binary']), log_loss(y['target_binary'], pred))
+        return pred_results.value_counts()
+    
+    def save_checkpoint(self, state, checkpoint_dir):
+        f_path = checkpoint_dir + '/' + '{}checkpoint.pt'.format(self.name)
+        torch.save(state, f_path)
+    
+    def load_checkpoint(self, checkpoint_fpath, model, optimizer):
+        my_file = Path(checkpoint_fpath)
+        epoch = 0 
+        if my_file.is_file(): ##if file exists
+            print('Loading saved checkpoint...')
+            checkpoint = torch.load(checkpoint_fpath)
+            model.load_state_dict(checkpoint['state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            epoch = checkpoint['epoch']
+        return model, optimizer, epoch
+    
+
+    
+
+    def train(self, X_train, Y_train, X_val, Y_val, epochs, batch_size, learning_rate, use_scheduler = False, scheduler_step_size = 25):
+        StandardScaler = preprocessing.StandardScaler().fit(X_train.iloc[:,1:])
+        model = self.model
         
+        X_train = pd.DataFrame(StandardScaler.transform(X_train.iloc[:,1:]), index = X_train['match_api_id'], columns = X_train.iloc[:,1:].columns)
+        X_val = pd.DataFrame(StandardScaler.transform(X_val.iloc[:,1:]), index = X_val['match_api_id'], columns = X_val.iloc[:,1:].columns)
+
+        loss, counter = 0, 0
+        losses_train, losses_val = [], []
+
+        dataset = TensorDataset(Tensor(X_train.values), torch.Tensor(Y_train['target_binary'].values))
+        train_loader = DataLoader(dataset, batch_size = batch_size, shuffle=True)
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=(0.9,0.999), weight_decay=0.1)
+        
+        if use_scheduler:
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size = scheduler_step_size , gamma = 0.1)
+        
+        model, optimizer, last_epoch = self.load_checkpoint('./NN checkpoints/{}checkpoint.pt'.format(self.name), model, optimizer)
+        
+        #Train Model
+        t = time.time()
+        for epoch in range(last_epoch, epochs+last_epoch):
+            for x, y in iter(train_loader):
+                model.train()
+                model.zero_grad()
+
+                #forward
+                y_pred = model(x)
+                loss = cross(y_pred, y.long())
+
+                #backward + update
+                loss.backward()
+                optimizer.step()
+
+                #store errors
+                with torch.no_grad():
+                    model.eval()
+                    y_train_pred = model(Tensor(X_train.values))
+                    y_val_pred = model(Tensor(X_val.values))
+
+                    loss_train = cross(y_train_pred, Tensor(Y_train['target_binary'].values).long())
+                    loss_val = cross(y_val_pred, Tensor(Y_val['target_binary'].values).long())
+
+                    losses_train.append(loss_train.item())
+                    losses_val.append(loss_val.item()) 
+                    
+                    if counter % 100 == 0:
+                        print('Loss after iteration {}: {}'.format(counter, loss_train.item()))
+
+
+
+                counter+=1 
+                
+            if use_scheduler:
+                scheduler.step()
+
+        time.time()-t
+        
+        #save checkpoint
+        checkpoint = {'epoch': epoch + 1, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}
+        self.save_checkpoint(checkpoint, './NN checkpoints')
+
+        ##Returns train/val accuracy/losses, the losses during the training for plotting, the prediction probabilities to be used for ensemble stuff
+        return list(self.evaluate(X_train, Y_train)) + list(self.evaluate(X_val, Y_val)), (losses_train, losses_val)
+
+    
+    
+    def evaluate(self, x, y):
+        model = self.model
+        model.eval()
+        with torch.no_grad():
+            pred = model(Tensor(x.values))
+        global pred_results 
+        pred_results = pd.Series(pred.max(1).indices)
+        return sklearn.metrics.accuracy_score(pred_results, y['target_binary']), log_loss(y['target_binary'], pred) 
+    
+
+    
     
     def n_layer_net(self, num_layers, in_out, sizes, activation_type, drop_out):
         assert len(sizes) == num_layers
@@ -175,26 +233,26 @@ class LinearNN():
         output_size = in_out[1]
         
         if num_layers ==4:
-            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
+            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
                     activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[1]), nn.Linear(sizes[1], sizes[2]), activation_type, nn.Dropout(p=drop_out), 
                     nn.BatchNorm1d(sizes[2]), nn.Linear(sizes[2], sizes[3]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[3]), nn.Linear(sizes[3],
                     output_size), nn.Softmax(dim = 1)
                         )     
         elif num_layers ==5:
-            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
+            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
                     activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[1]), nn.Linear(sizes[1], sizes[2]), activation_type, nn.Dropout(p=drop_out), 
                     nn.BatchNorm1d(sizes[2]), nn.Linear(sizes[2], sizes[3]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[3]), nn.Linear(sizes[3],
                     sizes[4]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[4]), nn.Linear(sizes[4], output_size), nn.Softmax(dim = 1)
                         )  
         elif num_layers ==6:
-            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
+            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
                     activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[1]), nn.Linear(sizes[1], sizes[2]), activation_type, nn.Dropout(p=drop_out), 
                     nn.BatchNorm1d(sizes[2]), nn.Linear(sizes[2], sizes[3]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[3]), nn.Linear(sizes[3],
                     sizes[4]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[4]), nn.Linear(sizes[4], sizes[5]), activation_type, 
                     nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[5]), nn.Linear(sizes[5], output_size), nn.Softmax(dim = 1)
                         )
         elif num_layers ==7:
-            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
+            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
                     activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[1]), nn.Linear(sizes[1], sizes[2]), activation_type, nn.Dropout(p=drop_out), 
                     nn.BatchNorm1d(sizes[2]), nn.Linear(sizes[2], sizes[3]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[3]), nn.Linear(sizes[3],
                     sizes[4]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[4]), nn.Linear(sizes[4], sizes[5]), activation_type, 
@@ -202,7 +260,7 @@ class LinearNN():
                     nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[6]),  nn.Linear(sizes[6], output_size), nn.Softmax(dim = 1)
                         )
         elif num_layers ==8:
-            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
+            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
                     activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[1]), nn.Linear(sizes[1], sizes[2]), activation_type, nn.Dropout(p=drop_out), 
                     nn.BatchNorm1d(sizes[2]), nn.Linear(sizes[2], sizes[3]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[3]), nn.Linear(sizes[3],
                     sizes[4]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[4]), nn.Linear(sizes[4], sizes[5]), activation_type, 
@@ -211,7 +269,7 @@ class LinearNN():
                     nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[7]),  nn.Linear(sizes[7], output_size), nn.Softmax(dim = 1)
                         )
         elif num_layers ==9:
-            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
+            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
                     activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[1]), nn.Linear(sizes[1], sizes[2]), activation_type, nn.Dropout(p=drop_out), 
                     nn.BatchNorm1d(sizes[2]), nn.Linear(sizes[2], sizes[3]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[3]), nn.Linear(sizes[3],
                     sizes[4]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[4]), nn.Linear(sizes[4], sizes[5]), activation_type, 
@@ -221,7 +279,7 @@ class LinearNN():
                     nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[8]),  nn.Linear(sizes[8], output_size), nn.Softmax(dim = 1)
                         )
         elif num_layers ==10:
-            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
+            model = nn.Sequential(nn.Linear(input_size, sizes[0]), activation_type, nn.BatchNorm1d(sizes[0]), nn.Linear(sizes[0], sizes[1]),
                     activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[1]), nn.Linear(sizes[1], sizes[2]), activation_type, nn.Dropout(p=drop_out), 
                     nn.BatchNorm1d(sizes[2]), nn.Linear(sizes[2], sizes[3]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[3]), nn.Linear(sizes[3],
                     sizes[4]), activation_type, nn.Dropout(p=drop_out), nn.BatchNorm1d(sizes[4]), nn.Linear(sizes[4], sizes[5]), activation_type, 
@@ -233,15 +291,8 @@ class LinearNN():
                         )
         else:
             print('Invalid num_layers: choose between 4 and 10')
+
+
+        model.apply(init_weights)
         return model
     
-def get_score(model, x, y, scaler):
-    x = pd.DataFrame(scaler.transform(x.iloc[:,1:]), index = x['match_api_id'], columns = x.iloc[:,1:].columns)
-    model.eval()
-    with torch.no_grad():
-        pred = model(Tensor(x.values))
-    global pred_results 
-    pred_results = pd.Series(pred.max(1).indices)
-
-    print(sklearn.metrics.accuracy_score(pred_results, y['target_binary']), log_loss(y['target_binary'], pred) )
-    return pred_results
