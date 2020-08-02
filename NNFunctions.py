@@ -20,35 +20,61 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import accuracy_score
 from pathlib import Path
-cross = nn.CrossEntropyLoss()
+import datetime
+import os
+import pickle
 
-def get_ens_df(x, scaler, model_dict): ##Gets the predictions of all the different models, given a scaler, and the explanatory variables
+now = datetime.datetime.now()
+cross = nn.CrossEntropyLoss()
+torch.manual_seed(0)
+
+def remove_existing_checkpoints(model_dict):
+    for model in model_dict:
+        my_file = Path("./NN checkpoints/{}checkpoint.pt".format(model))
+        if my_file.is_file(): ##if file exists
+            os.remove("./NN checkpoints/{}checkpoint.pt".format(model))
+            
+def get_ens_df(x, scaler, model_dict, is_models = False, use_odds = True): ##Gets the predictions of all the different models, given a scaler, and the explanatory variables
     
     X = pd.DataFrame(scaler.transform(x.iloc[:,1:]), index = x['match_api_id'], columns = x.iloc[:,1:].columns) ##data to get predictions from
     x_ens = pd.DataFrame(data =  0, index = x.index, columns = []) #empty df to fill with all the different model predictions
 
     for model_name in model_dict:
-        model = model_dict[model_name].model
+        if not is_models:
+            model = model_dict[model_name].model
+        else:
+            model = model_dict[model_name]
+            
         with torch.no_grad():
             pred = model(Tensor(X.values))
             
-        x_train_ens = pd.DataFrame(data =  np.array(pred), index = x.index, columns = ['{}_0'.format(model_name), '{}_1'.format(model_name)])
+        x_train_ens = pd.DataFrame(data =  np.array(pred), index = x.index, columns = ['{}_0'.format(model_name), '{}_1'.format(model_name), '{}_2'.format(model_name)])
         x_ens = pd.concat([x_ens, x_train_ens], axis = 1)
+    
+    if use_odds:
+        odds = x[['B365H', 'B365D', 'B365A']]
+        odds.index = x_ens.index
+        x_ens = pd.concat([x_ens, odds], axis = 1)
+        
     return x_ens
 
-def plot_losses(big_losses_list, model_dict, splits): ##input is a list of tuples, train losses = tuple[0], val losses = tuple[1]
+def plot_losses(model_dict): ##input is a list of tuples, train losses = tuple[0], val losses = tuple[1]
     
-    fig, axes = plt.subplots(nrows = len(model_dict), ncols=splits, figsize = (splits*4, len(model_dict)*2))
+    fig, axes = plt.subplots(nrows = len(model_dict), ncols=1, figsize = (4, len(model_dict)*2))
+    
     for i, ax in enumerate(axes.flatten()):
-        if i < len(big_losses_list):
+        model = model_dict[list(model_dict.keys())[i]]
+        ax.plot(model.losses_list[0])
+        ax.plot(model.losses_list[1])
+        ax.set_title(list(model_dict.keys())[i])
             
-            ax.plot(big_losses_list[i][0])
-            ax.plot(big_losses_list[i][1])
-            ax.set_title(list(model_dict.keys())[math.floor(i/splits)])
-            
-def save_models(models): ##input is a list of model names which are present in the model_dict
+def save_models(models, model_dict): ##input is a list of model names which are present in the model_dict
+    new_dir = './NN Models/ensemble' + "_" + str(now.hour) + "_"  + str(now.day) + "_" + str(now.month)
+    os.mkdir(new_dir)
+    
     for model in models:
-        torch.save(model_dict[model].model, './NN Models/{}.pt'.format(model))
+        torch.save(model_dict[model].model, new_dir + '/{}.pt'.format(model + "_" + str(now.day) + "_" + str(now.month)))
+
 
 def ensemble_predict_simple(models, x, y, scaler):
     global pred_ensemble, y_ens
@@ -63,41 +89,55 @@ def ensemble_predict_simple(models, x, y, scaler):
             pred_ensemble += pred
     
     y_ens = pd.Series(pred_ensemble.max(1).indices)
-    print('Ensemble accuracy: {}'.format(accuracy_score(y_ens, y['target_binary'])))
+    print('Ensemble accuracy: {}'.format(accuracy_score(y_ens, y['target'])))
     #print('Ensemble log loss: {}'.format(log_loss(y['target'], y_ens)))
     
-def train_many(model_dict, x_train, y_train, batch_size, splits = 1, epochs = 5, learning_rate = 0.01, use_scheduler = False, scheduler_step_size = 50):
-    if splits == 1:
-        _, __, ___, ____ = train_test_split(x_train, y_train, test_size = 0.1, random_state = 1)
-        training_indices = [(_.index, ____.index)]
-        _, __, ___, ____ = 0, 0, 0, 0
+    
+def train_one(model_dict, model_name, x_train, y_train, batch_size, epochs = 5, learning_rate = 0.01, use_scheduler = False, scheduler_step_size = 50, random_state = 0):
+
+    _, __, ___, ____ = train_test_split(x_train, y_train, test_size = 0.1, random_state = random_state)
+    training_indices = [(_.index, ____.index)]
+    _, __, ___, ____ = 0, 0, 0, 0
     
     results = pd.DataFrame(data = 0, index = model_dict.keys(), columns = ['t_acc', 't_loss', 'v_acc', 'v_loss'])
     big_losses_list = [] ##for plotting losses
 
 
-    for model_name in model_dict:
-        model = model_dict[model_name]
-        print('\n' + model_name)
-        
-        if splits > 1:
-            kf = KFold(n_splits=splits, random_state=1, shuffle=True)
-            training_indices = kf.split(x_train)
-            
-        for train_index, val_index in training_indices: 
-            
-            X_train, X_val = x_train[x_train.index.isin(train_index)], x_train[x_train.index.isin(val_index)]
-            Y_train, Y_val = y_train[y_train.index.isin(train_index)], y_train[y_train.index.isin(val_index)]
-  
-            
-            results_list, losses = model.train(X_train, Y_train, X_val, Y_val, epochs, get_batch_size(X_train, batch_size), learning_rate, use_scheduler,  scheduler_step_size)
-            results.loc[model_name, :] = results.loc[model_name, :].add(results_list)
-            big_losses_list.append(losses)
-            print('. ', end=' ')
-    
+    model = model_dict[model_name]
+    print('\n' + model_name)
+
+ 
+    for train_index, val_index in training_indices: 
+
+        X_train, X_val = x_train[x_train.index.isin(train_index)], x_train[x_train.index.isin(val_index)]
+        Y_train, Y_val = y_train[y_train.index.isin(train_index)], y_train[y_train.index.isin(val_index)]
+
+
+        results_list, losses = model.train(X_train, Y_train, X_val, Y_val, epochs, get_batch_size(X_train, batch_size), learning_rate, use_scheduler,  scheduler_step_size)
+        results.loc[model_name, :] = results.loc[model_name, :].add(results_list)    
 
     results /= splits
-    return results, big_losses_list
+    return results
+
+def train_many(model_dict, x_train, y_train, batch_size, epochs = 5, learning_rate = 0.01, use_scheduler = False, scheduler_step_size = 50, change_trainset = False):
+
+    results = pd.DataFrame(data = 0, index = model_dict.keys(), columns = ['t_acc', 't_loss', 'v_acc', 'v_loss'])
+    
+    random_states = [0 for x in range(len(model_dict))]
+    if change_trainset:
+        random_states = [x for x in range(len(model_dict))]
+        
+    for i, model_name in enumerate(model_dict):
+        print('\n' + model_name)
+        model = model_dict[model_name]
+               
+        X_train, X_val, Y_train, Y_val=  train_test_split(x_train, y_train, test_size = 0.1, random_state = random_states[i])
+
+        results_list, losses = model.train(X_train, Y_train, X_val, Y_val, epochs, get_batch_size(X_train, batch_size), learning_rate, use_scheduler,  scheduler_step_size)
+        results.loc[model_name, :] = results.loc[model_name, :].add(results_list)
+        print('. ', end=' ')
+
+    return results
 
 def get_batch_size(x, size):
     if type(size) != int :
@@ -116,6 +156,10 @@ class LinearNN():
         self.num_layers = num_layers
         self.activation_type = activation_type
         self.name = model_name
+        self.losses_list = [[],[]]
+        self.scores = 0
+        self.predictions_train = []
+        self.checkpoints = {}
     
        
     
@@ -127,7 +171,7 @@ class LinearNN():
             pred = model(Tensor(x.values))
         pred_results = pd.Series(pred.max(1).indices)
 
-        print(sklearn.metrics.accuracy_score(pred_results, y['target_binary']), log_loss(y['target_binary'], pred))
+        print(sklearn.metrics.accuracy_score(pred_results, y['target']), log_loss(y['target'], pred))
         return pred_results.value_counts()
     
     def save_checkpoint(self, state, checkpoint_dir):
@@ -158,7 +202,7 @@ class LinearNN():
         loss, counter = 0, 0
         losses_train, losses_val = [], []
 
-        dataset = TensorDataset(Tensor(X_train.values), torch.Tensor(Y_train['target_binary'].values))
+        dataset = TensorDataset(Tensor(X_train.values), torch.Tensor(Y_train['target'].values))
         train_loader = DataLoader(dataset, batch_size = batch_size, shuffle=True)
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=(0.9,0.999), weight_decay=0.1)
         
@@ -188,8 +232,8 @@ class LinearNN():
                     y_train_pred = model(Tensor(X_train.values))
                     y_val_pred = model(Tensor(X_val.values))
 
-                    loss_train = cross(y_train_pred, Tensor(Y_train['target_binary'].values).long())
-                    loss_val = cross(y_val_pred, Tensor(Y_val['target_binary'].values).long())
+                    loss_train = cross(y_train_pred, Tensor(Y_train['target'].values).long())
+                    loss_val = cross(y_val_pred, Tensor(Y_val['target'].values).long())
 
                     losses_train.append(loss_train.item())
                     losses_val.append(loss_val.item()) 
@@ -203,14 +247,20 @@ class LinearNN():
                 
             if use_scheduler:
                 scheduler.step()
-
+                
+            self.checkpoints[epoch + 1] = model.state_dict()
         time.time()-t
         
         #save checkpoint
         checkpoint = {'epoch': epoch + 1, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}
         self.save_checkpoint(checkpoint, './NN checkpoints')
 
-        ##Returns train/val accuracy/losses, the losses during the training for plotting, the prediction probabilities to be used for ensemble stuff
+        ##Record stuff
+        self.losses_list[0].extend(losses_train)
+        self.losses_list[1].extend(losses_val)
+        self.scores = list(self.evaluate(X_train, Y_train)) + list(self.evaluate(X_val, Y_val))
+        self.predictions_train = pd.Series(y_train_pred.max(1).indices)
+
         return list(self.evaluate(X_train, Y_train)) + list(self.evaluate(X_val, Y_val)), (losses_train, losses_val)
 
     
@@ -222,7 +272,7 @@ class LinearNN():
             pred = model(Tensor(x.values))
         global pred_results 
         pred_results = pd.Series(pred.max(1).indices)
-        return sklearn.metrics.accuracy_score(pred_results, y['target_binary']), log_loss(y['target_binary'], pred) 
+        return sklearn.metrics.accuracy_score(pred_results, y['target']), log_loss(y['target'], pred) 
     
 
     

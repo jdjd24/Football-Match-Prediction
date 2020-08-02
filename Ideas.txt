@@ -41,6 +41,7 @@ Batch size?
 Drop out / weight decay?
 Ensemble method?
 Data - remove some features? How to determine most useful features?
+How to revert back to a version of model at an earlier instance?
 
 
 
